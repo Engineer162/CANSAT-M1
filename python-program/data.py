@@ -14,10 +14,10 @@ import logging
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 
-ARDUINO_PORT = "/dev/ttyACM3"   # Change to your port (e.g. "COM3" on Windows)
+ARDUINO_PORT = "COM11"   # Change to your port (e.g. "COM3" on Windows)
 BAUD_RATE = 9600
 MAX_POINTS = 100                # Rolling window size
-PLOT_INTERVAL_MS = 500          # How often (ms) the plot refreshes
+PLOT_INTERVAL_MS = 1000          # How often (ms) the plot refreshes
 
 # ─── Logging ────────────────────────────────────────────────────────────────
 
@@ -32,10 +32,17 @@ log = logging.getLogger(__name__)
 
 # Pre-compile every regex once at module load — avoids recompiling each frame.
 SENSOR_PATTERNS: dict[str, re.Pattern] = {
+    "accel_x":          re.compile(r"Acceleration X:\s*([-+]?[\d.]+)"),
+    "accel_y":          re.compile(r"Y:\s*([-+]?[\d.]+)"),
+    "accel_z":          re.compile(r"Z:\s*([-+]?[\d.]+)"),
+    "rotation_x":       re.compile(r"Rotation X:\s*([-+]?[\d.]+)"),
+    "rotation_y":       re.compile(r"Y:\s*([-+]?[\d.]+)"),
+    "rotation_z":       re.compile(r"Z:\s*([-+]?[\d.]+)"),
     "pressure":         re.compile(r"Pressure:\s*([\d.]+)\s*Pa"),
-    "raw_altitude":     re.compile(r"Raw altitude:\s*([-\d.]+)\s*m"),
-    "filtered_altitude":re.compile(r"Filtered altitude:\s*([-\d.]+)\s*m"),
-    "mpu_temp":         re.compile(r"MPU Temp:\s*([\d.]+)\s*C"),
+    "raw_altitude":     re.compile(r"Raw altitude:\s*([-+]?[\d.]+)\s*m"),
+    "filtered_altitude":re.compile(r"Filtered altitude:\s*([-+]?[\d.]+)\s*m"),
+    "mpu_temp":         re.compile(r"MPU Temperature:\s*([-+]?[\d.]+)\s*degC"),
+    "bmp_temp":         re.compile(r"BMP Temperature:\s*([-+]?[\d.]+)\s*degC"),
 }
 
 SENSOR_KEYS = list(SENSOR_PATTERNS.keys())
@@ -103,7 +110,9 @@ class SerialReader:
                 key, value = parse_sensor_data(line)
                 if key and value is not None:
                     self.data[key].append(value)
-                    log.debug("%s = %s", key, value)
+                    log.info("Parsed: %s = %s", key, value)
+                else:
+                    log.debug("No match for line: %s", line[:60])
 
         except serial.SerialException as exc:
             log.warning("Serial read error: %s", exc)
@@ -135,9 +144,13 @@ class LivePlotter:
     def __init__(self, reader: SerialReader):
         self.reader = reader
 
-        self.fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        self.fig, axes = plt.subplots(2, 2, figsize=(16, 12))
         self.ax1, self.ax2, self.ax3, self.ax4 = axes.flat
         self.fig.suptitle("CANSAT Sensor Data Monitoring", fontsize=14, fontweight="bold")
+        self.fig.subplots_adjust(hspace=0.35, wspace=0.3, top=0.95, bottom=0.08)
+        
+        # Create secondary y-axis for pressure/altitude plot
+        self.ax3_altitude = self.ax3.twinx()
 
     # ── animation callback ───────────────────────────────────────────────────
 
@@ -149,39 +162,51 @@ class LivePlotter:
         axes = [self.ax1, self.ax2, self.ax3, self.ax4]
         for ax in axes:
             ax.clear()
+        self.ax3_altitude.clear()
 
         x = list(range(max((len(d[k]) for k in SENSOR_KEYS), default=0)))
 
-        # ── Pressure ─────────────────────────────────────────────────────────
-        self._plot_single(
-            self.ax1, x, d["pressure"],
-            color="b", marker="o",
-            ylabel="Pressure (Pa)", title="Pressure",
-        )
-
-        # ── Altitude (raw vs filtered) ───────────────────────────────────────
-        if d["raw_altitude"] and d["filtered_altitude"]:
-            n = min(len(d["raw_altitude"]), len(d["filtered_altitude"]))
+        # ── Acceleration ─────────────────────────────────────────────────────
+        if d["accel_x"] and d["accel_y"] and d["accel_z"]:
+            n = min(len(d["accel_x"]), len(d["accel_y"]), len(d["accel_z"]))
             xs = list(range(n))
-            self.ax2.plot(xs, list(d["raw_altitude"])[:n],  "r-", label="Raw",      marker="o", alpha=0.7)
-            self.ax2.plot(xs, list(d["filtered_altitude"])[:n], "g-", label="Filtered", marker="s", alpha=0.7)
-            self._style(self.ax2, ylabel="Altitude (m)", title="Altitude", legend=True)
+            self.ax1.plot(xs, list(d["accel_x"])[:n],  "r-", label="X", marker="o", alpha=0.7)
+            self.ax1.plot(xs, list(d["accel_y"])[:n],  "g-", label="Y", marker="s", alpha=0.7)
+            self.ax1.plot(xs, list(d["accel_z"])[:n],  "b-", label="Z", marker="^", alpha=0.7)
+            self._style(self.ax1, ylabel="Acceleration (m/s²)", title="Acceleration", legend=True)
 
-        # ── MPU Temperature ──────────────────────────────────────────────────
-        self._plot_single(
-            self.ax3, x, d["mpu_temp"],
-            color="orange", marker="D",
-            ylabel="Temperature (°C)", title="MPU Temperature",
-        )
-
-        # ── Normalised overlay ───────────────────────────────────────────────
-        if d["pressure"] and d["filtered_altitude"] and d["mpu_temp"]:
-            n = min(len(d["pressure"]), len(d["filtered_altitude"]), len(d["mpu_temp"]))
+        # ── Rotation (Angular Velocity) ──────────────────────────────────────
+        if d["rotation_x"] and d["rotation_y"] and d["rotation_z"]:
+            n = min(len(d["rotation_x"]), len(d["rotation_y"]), len(d["rotation_z"]))
             xs = list(range(n))
-            self.ax4.plot(xs, _normalize(d["pressure"])[:n],         "b-",     label="Pressure",  marker="o", alpha=0.7)
-            self.ax4.plot(xs, _normalize(d["filtered_altitude"])[:n], "g-",     label="Altitude",  marker="s", alpha=0.7)
-            self.ax4.plot(xs, _normalize(d["mpu_temp"])[:n],          color="orange", label="Temp", marker="D", alpha=0.7)
-            self._style(self.ax4, ylabel="Normalised Value", title="All Sensors (Normalised)", legend=True)
+            self.ax2.plot(xs, list(d["rotation_x"])[:n],  "r-", label="X", marker="o", alpha=0.7)
+            self.ax2.plot(xs, list(d["rotation_y"])[:n],  "g-", label="Y", marker="s", alpha=0.7)
+            self.ax2.plot(xs, list(d["rotation_z"])[:n],  "b-", label="Z", marker="^", alpha=0.7)
+            self._style(self.ax2, ylabel="Rotation (rad/s)", title="Angular Velocity", legend=True)
+
+        # ── Pressure & Altitude ──────────────────────────────────────────────
+        if d["pressure"] and d["raw_altitude"] and d["filtered_altitude"]:
+            n = min(len(d["pressure"]), len(d["raw_altitude"]), len(d["filtered_altitude"]))
+            xs = list(range(n))
+            self.ax3.plot(xs, list(d["pressure"])[:n], "b-", label="Pressure", marker="o", alpha=0.7)
+            self.ax3_altitude.plot(xs, list(d["raw_altitude"])[:n], "r--", label="Raw Alt", marker="s", alpha=0.7)
+            self.ax3_altitude.plot(xs, list(d["filtered_altitude"])[:n], "g--", label="Filtered Alt", marker="^", alpha=0.7)
+            self.ax3.set_ylabel("Pressure (Pa)", fontsize=10, color="b")
+            self.ax3_altitude.set_ylabel("Altitude (m)", fontsize=10, color="g")
+            self.ax3.set_title("Pressure and Altitude over Time", fontsize=12, fontweight="bold")
+            self.ax3.grid(True, alpha=0.3)
+            self.ax3.set_xlabel("Sample Number", fontsize=10)
+            lines1, labels1 = self.ax3.get_legend_handles_labels()
+            lines2, labels2 = self.ax3_altitude.get_legend_handles_labels()
+            self.ax3.legend(lines1 + lines2, labels1 + labels2, loc="best")
+
+        # ── Temperatures (MPU and BMP) ───────────────────────────────────────
+        if d["mpu_temp"] and d["bmp_temp"]:
+            n = min(len(d["mpu_temp"]), len(d["bmp_temp"]))
+            xs = list(range(n))
+            self.ax4.plot(xs, list(d["mpu_temp"])[:n], "orange", label="MPU Temp", marker="D", alpha=0.7)
+            self.ax4.plot(xs, list(d["bmp_temp"])[:n], "purple", label="BMP Temp", marker="D", alpha=0.7)
+            self._style(self.ax4, ylabel="Temperature (°C)", title="Temperatures", legend=True)
 
         # ── shared x-label ───────────────────────────────────────────────────
         for ax in axes:
@@ -209,7 +234,6 @@ class LivePlotter:
     def start(self) -> None:
         # Keep a reference so the animation isn't garbage-collected.
         self._ani = FuncAnimation(self.fig, self.update, interval=PLOT_INTERVAL_MS)
-        plt.tight_layout()
         plt.show()
 
 
