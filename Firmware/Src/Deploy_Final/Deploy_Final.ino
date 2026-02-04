@@ -12,6 +12,8 @@ float seaLevelPressure = 101325.0;
 float filteredAltitude = 0.0;
 float alpha = 0.95;   // smoothing factor
 
+bool LogData = false;
+
 
 void setup(void) {
   Serial.begin(9600);
@@ -100,8 +102,63 @@ void setup(void) {
 }
 
 void loop() {
+    
+  while (Serial.available() == 0) 
+  {
+    String command = Serial.readString();
+    command.trim();
+    if (command == "Device.Begin.DataLog") {
+      Serial.println("Starting DataLog");
+      LogData = true;
+      DataLog();
+    } 
+    else if (command == "Device.Stop.DataLog") 
+    {
+      Serial.println("DataLog has not yet started.");
+    }
+    else 
+    {
+      Serial.println("Awaiting command");
+    }
+    delay(1000);
+  }
+}
 
-  /* Get new sensor events with the readings */
+void calibrateBarometer() {
+  Serial.println("Calibrating barometer...");
+
+  float pressure = bmp.readPressure();
+
+  // Calculate sea-level pressure from known altitude
+  seaLevelPressure = pressure / pow(
+    1.0 - (knownAltitude / 44330.0),
+    5.255
+  );
+
+  Serial.print("Measured pressure: ");
+  Serial.print(pressure);
+  Serial.println(" Pa");
+
+  Serial.print("Calculated sea-level pressure: ");
+  Serial.print(seaLevelPressure);
+  Serial.println(" Pa");
+
+  Serial.println("Calibration complete.");
+}
+
+void DataLog() {
+  while (LogData == true) {
+    if (Serial.available() == 1) {
+      String command = Serial.readString();  //read until timeout
+      command.trim();                        // remove any \r \n whitespace at the end of the String
+      if (command == "Device.Stop.DataLog") {
+        Serial.println("Stopping DataLog");
+        LogData = false;
+      } else {
+        Serial.println("Unknown Command");
+      }
+    }
+    /* Get new sensor events with the readings */
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
 
@@ -151,26 +208,5 @@ void loop() {
 
   Serial.println("");
   delay(10);
-}
-
-void calibrateBarometer() {
-  Serial.println("Calibrating barometer...");
-
-  float pressure = bmp.readPressure();
-
-  // Calculate sea-level pressure from known altitude
-  seaLevelPressure = pressure / pow(
-    1.0 - (knownAltitude / 44330.0),
-    5.255
-  );
-
-  Serial.print("Measured pressure: ");
-  Serial.print(pressure);
-  Serial.println(" Pa");
-
-  Serial.print("Calculated sea-level pressure: ");
-  Serial.print(seaLevelPressure);
-  Serial.println(" Pa");
-
-  Serial.println("Calibration complete.");
+  }
 }
